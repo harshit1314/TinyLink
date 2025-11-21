@@ -15,6 +15,24 @@ app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
+// Lightweight request logger to help debugging on serverless hosts (Vercel logs)
+app.use((req, res, next) => {
+  try {
+    const id = (Math.random().toString(36).slice(2, 9));
+    console.log(`[REQ ${id}] ${req.method} ${req.originalUrl} Host:${req.headers.host}`);
+    // Also log when an /api request starts and ends
+    if (req.originalUrl.startsWith('/api')) {
+      const start = Date.now();
+      res.on('finish', () => {
+        console.log(`[REQ ${id}] ${req.method} ${req.originalUrl} -> ${res.statusCode} ${Date.now()-start}ms`);
+      });
+    }
+  } catch (e) {
+    // ignore logging errors
+  }
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 function validateCode(code) {
