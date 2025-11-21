@@ -1,98 +1,108 @@
+const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs').promises;
 
 const DB_FILE = process.env.JSON_DB_FILE || path.join(__dirname, 'data.json');
 
-// If running on serverless platforms (Vercel), avoid writing to project FS.
-const IS_SERVERLESS = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME || !!process.env.FUNCTIONS_WORKER_RUNTIME;
+const DATABASE_URL = process.env.DATABASE_URL;
 
-// In-memory fallback store (lives for cold-start lifetime)
+// In-memory fallback store for non-Postgres / serverless environments
 const memory = { links: [] };
 
-async function readFileSafe() {
+async function ensureLocalFile() {
   try {
     const raw = await fs.readFile(DB_FILE, 'utf8');
-    return JSON.parse(raw);
+    memory.links = JSON.parse(raw).links || [];
   } catch (e) {
-    return { links: [] };
+    memory.links = memory.links || [];
+    try {
+      await fs.writeFile(DB_FILE, JSON.stringify({ links: memory.links }, null, 2), 'utf8');
+    } catch (_) {}
   }
 }
 
-async function writeFileSafe(data) {
-  try {
-    await fs.writeFile(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
-    return true;
-  } catch (e) {
-    // cannot write (likely read-only filesystem) — fall back to memory
-    return false;
-  }
+let pool;
+async function initPg() {
+  if (!DATABASE_URL) return;
+  if (pool) return;
+  pool = new Pool({ connectionString: DATABASE_URL });
+  // Create table if not exists
+  const create = `
+    CREATE TABLE IF NOT EXISTS links (
+      code VARCHAR(64) PRIMARY KEY,
+      url TEXT NOT NULL,
+      clicks INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_clicked TIMESTAMPTZ
+    );
+  `;
+  await pool.query(create);
 }
+
+// Initialize memory file for local dev
+ensureLocalFile().catch(()=>{});
 
 async function createLink({ code, url }) {
-  const now = new Date().toISOString();
-  if (IS_SERVERLESS) {
-    if (memory.links.find(l => l.code === code)) throw new Error('exists');
-    memory.links.push({ code, url, clicks: 0, created_at: now, last_clicked: null });
-    return;
+  if (DATABASE_URL) {
+    await initPg();
+    try {
+      await pool.query('INSERT INTO links(code, url, clicks, created_at) VALUES($1,$2,0,now())', [code, url]);
+      return;
+    } catch (e) {
+      if (e && e.code === '23505') throw new Error('exists');
+      throw e;
+    }
   }
 
-  const data = await readFileSafe();
-  if (data.links.find(l => l.code === code)) throw new Error('exists');
-  data.links.push({ code, url, clicks: 0, created_at: now, last_clicked: null });
-  const ok = await writeFileSafe(data);
-  if (!ok) {
-    // fallback to memory if file write failed
-    memory.links = data.links;
-  }
+  // local / memory
+  if (memory.links.find(l => l.code === code)) throw new Error('exists');
+  const now = new Date().toISOString();
+  memory.links.push({ code, url, clicks: 0, created_at: now, last_clicked: null });
+  try { await fs.writeFile(DB_FILE, JSON.stringify({ links: memory.links }, null, 2), 'utf8'); } catch (e) {}
 }
 
 async function getLink(code) {
-  if (IS_SERVERLESS) {
-    return memory.links.find(l => l.code === code) || null;
+  if (DATABASE_URL) {
+    await initPg();
+    const r = await pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links WHERE code = $1', [code]);
+    return r.rows[0] || null;
   }
-  const data = await readFileSafe();
-  return data.links.find(l => l.code === code) || null;
+  return memory.links.find(l => l.code === code) || null;
 }
 
 async function listLinks() {
-  if (IS_SERVERLESS) {
-    return memory.links.slice().sort((a,b)=> new Date(b.created_at) - new Date(a.created_at));
+  if (DATABASE_URL) {
+    await initPg();
+    const r = await pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links ORDER BY created_at DESC');
+    return r.rows;
   }
-  const data = await readFileSafe();
-  return data.links.slice().sort((a,b)=> new Date(b.created_at) - new Date(a.created_at));
+  return memory.links.slice().sort((a,b)=> new Date(b.created_at) - new Date(a.created_at));
 }
 
 async function incrementClick(code) {
-  const now = new Date().toISOString();
-  if (IS_SERVERLESS) {
-    const item = memory.links.find(l => l.code === code);
-    if (!item) return null;
-    item.clicks = (item.clicks || 0) + 1;
-    item.last_clicked = now;
-    return item;
+  if (DATABASE_URL) {
+    await initPg();
+    const r = await pool.query('UPDATE links SET clicks = clicks + 1, last_clicked = now() WHERE code = $1 RETURNING code, url, clicks, created_at, last_clicked', [code]);
+    return r.rows[0] || null;
   }
-  const data = await readFileSafe();
-  const item = data.links.find(l => l.code === code);
+  const item = memory.links.find(l => l.code === code);
   if (!item) return null;
   item.clicks = (item.clicks || 0) + 1;
-  item.last_clicked = now;
-  const ok = await writeFileSafe(data);
-  if (!ok) memory.links = data.links;
+  item.last_clicked = new Date().toISOString();
+  try { await fs.writeFile(DB_FILE, JSON.stringify({ links: memory.links }, null, 2), 'utf8'); } catch (e) {}
   return item;
 }
 
 async function deleteLink(code) {
-  if (IS_SERVERLESS) {
-    const before = memory.links.length;
-    memory.links = memory.links.filter(l => l.code !== code);
-    return { changed: before - memory.links.length };
+  if (DATABASE_URL) {
+    await initPg();
+    const r = await pool.query('DELETE FROM links WHERE code = $1 RETURNING code', [code]);
+    return { changed: r.rowCount };
   }
-  const data = await readFileSafe();
-  const before = data.links.length;
-  data.links = data.links.filter(l => l.code !== code);
-  const ok = await writeFileSafe(data);
-  if (!ok) memory.links = data.links;
-  return { changed: before - data.links.length };
+  const before = memory.links.length;
+  memory.links = memory.links.filter(l => l.code !== code);
+  try { await fs.writeFile(DB_FILE, JSON.stringify({ links: memory.links }, null, 2), 'utf8'); } catch (e) {}
+  return { changed: before - memory.links.length };
 }
 
 module.exports = {
