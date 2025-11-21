@@ -25,8 +25,21 @@ let pool;
 async function initPg() {
   if (!DATABASE_URL) return;
   if (pool) return;
-  pool = new Pool({ connectionString: DATABASE_URL });
-  // Create table if not exists
+  // Configure pool for serverless: small pool and short timeouts so it fails fast instead
+  const poolOpts = {
+    connectionString: DATABASE_URL,
+    max: process.env.VERCEL ? 1 : 10,
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 10000,
+  };
+
+  // Some hosts (Neon) require SSL; allow override via DB_SSL or PGSSLMODE
+  const needSSL = !!process.env.DB_SSL || (process.env.PGSSLMODE === 'require') || !!process.env.VERCEL;
+  if (needSSL) poolOpts.ssl = { rejectUnauthorized: false };
+
+  pool = new Pool(poolOpts);
+
+  // Create table if not exists, but guard with a short timeout to avoid function invocation timeout
   const create = `
     CREATE TABLE IF NOT EXISTS links (
       code VARCHAR(64) PRIMARY KEY,
@@ -36,7 +49,19 @@ async function initPg() {
       last_clicked TIMESTAMPTZ
     );
   `;
-  await pool.query(create);
+
+  // Helper to run a promise with a timeout
+  const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
+
+  // Try a quick connectivity check then create table; if either fails, clean up pool and fall back
+  try {
+    await withTimeout(pool.query('SELECT 1'), 4000, 'pg ping timeout');
+    await withTimeout(pool.query(create), 4000, 'pg create table timeout');
+  } catch (e) {
+    console.error('Postgres init failed or timed out; falling back to memory store:', e && e.message ? e.message : e);
+    try { await pool.end(); } catch(_){}
+    pool = null;
+  }
 }
 
 // Initialize memory file for local dev
