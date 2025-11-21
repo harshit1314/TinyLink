@@ -123,10 +123,31 @@
       }
 
       async function loadLinks() {
-        const res = await fetch('/api/links');
-        const data = await res.json();
-        cached = data;
-        applyFilterSort();
+        try {
+          const res = await fetch('/api/links');
+          if (!res.ok) {
+            const txt = await res.text().catch(()=>null);
+            console.error('API GET /api/links error', res.status, txt);
+            cached = [];
+            applyFilterSort();
+            return;
+          }
+          const ct = res.headers.get('content-type') || '';
+          if (!ct.includes('application/json')) {
+            const txt = await res.text().catch(()=>null);
+            console.error('Unexpected non-JSON response from /api/links:', txt);
+            cached = [];
+            applyFilterSort();
+            return;
+          }
+          const data = await res.json().catch(()=>[]);
+          cached = Array.isArray(data) ? data : [];
+          applyFilterSort();
+        } catch (err) {
+          console.error('Failed to load links', err);
+          cached = [];
+          applyFilterSort();
+        }
       }
 
       function applyFilterSort() {
@@ -157,9 +178,10 @@
         const body = { url: urlVal };
         if (codeVal) body.code = codeVal;
         const res = await fetch('/api/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        if (res.status === 201) {
-          const data = await res.json();
-          msg.textContent = `Created ${data.code}`;
+        if (res.ok && res.status === 201) {
+          let data = {};
+          try { data = await res.json(); } catch(e) { console.error('Invalid JSON response for POST /api/links', e); }
+          msg.textContent = `Created ${data.code || ''}`;
           urlInput.value = '';
           codeInput.value = '';
           loadLinks();
@@ -167,8 +189,13 @@
           const err = await res.json().catch(()=>({ error: 'Conflict' }));
           msg.textContent = err.error || 'Code exists';
         } else {
-          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-          msg.textContent = err.error || 'Error';
+          const text = await res.text().catch(()=>null);
+          try {
+            const err = text ? JSON.parse(text) : null;
+            msg.textContent = (err && err.error) ? err.error : (text || 'Error');
+          } catch (e) {
+            msg.textContent = text || 'Error';
+          }
         }
         createBtn.disabled = false;
         setTimeout(()=> msg.textContent = '', 2500);
