@@ -3,7 +3,7 @@ const express = require('express');
 const path = require('path');
 const cors = require('cors');
 const morgan = require('morgan');
-const { nanoid } = require('nanoid');
+const crypto = require('crypto');
 const { URL } = require('url');
 
 const db = require('./db');
@@ -30,6 +30,16 @@ function validateUrl(s) {
   }
 }
 
+function generateCode(len = 6) {
+  const alphabet = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const bytes = crypto.randomBytes(len);
+  let out = '';
+  for (let i = 0; i < len; i++) {
+    out += alphabet[bytes[i] % alphabet.length];
+  }
+  return out;
+}
+
 // Health
 app.get('/healthz', (req, res) => {
   res.json({ ok: true, version: '1.0' });
@@ -51,7 +61,7 @@ app.post('/api/links', async (req, res) => {
     } else {
       // generate
       for (let i = 0; i < 10; i++) {
-        const gen = nanoid(6);
+        const gen = generateCode(6);
         const exists = await db.getLink(gen);
         if (!exists) { useCode = gen; break; }
       }
