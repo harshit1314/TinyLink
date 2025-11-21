@@ -107,6 +107,11 @@ app.get('/:code', async (req, res) => {
   return res.redirect(302, row.url);
 });
 
-app.listen(PORT, () => {
-  console.log(`TinyLink running on port ${PORT}`);
-});
+// Only start listening when not running on a serverless platform (e.g., Vercel)
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`TinyLink running on port ${PORT}`);
+  });
+}
+
+module.exports = app;
