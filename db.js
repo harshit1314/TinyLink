@@ -24,6 +24,7 @@ async function ensureLocalFile() {
 let pool = null;
 let initializing = false;
 let dnsChecked = false;
+let dbUnavailableUntil = 0;
 
 const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
 
@@ -82,6 +83,9 @@ async function initPg() {
     console.error('Postgres init failed or timed out; falling back to memory store:', e && e.message ? e.message : e);
     try { await pool.end(); } catch (_) {}
     pool = null;
+      // back off further attempts for a short period to avoid repeated cold-start hangs
+      const backoff = parseInt(process.env.DB_BACKOFF_MS || '60000', 10);
+      dbUnavailableUntil = Date.now() + backoff;
   } finally {
     initializing = false;
   }
@@ -90,8 +94,8 @@ async function initPg() {
 ensureLocalFile().catch(()=>{});
 
 async function createLink({ code, url }) {
-  // If pool is ready, use it. If not, attempt to start init asynchronously and fall back to memory.
-  if (DATABASE_URL && pool) {
+  // If pool is ready and DB is not in backoff, use it. If not, start init async and fall back to memory.
+  if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
     try {
       await pool.query('INSERT INTO links(code, url, clicks, created_at) VALUES($1,$2,0,now())', [code, url]);
       return;
@@ -102,7 +106,7 @@ async function createLink({ code, url }) {
   }
 
   // trigger async initialization if not already started
-  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
+  if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
 
   // Fallback to local memory store
   if (memory.links.find(l => l.code === code)) throw new Error('exists');
@@ -112,29 +116,29 @@ async function createLink({ code, url }) {
 }
 
 async function getLink(code) {
-  if (DATABASE_URL && pool) {
+  if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
     const r = await pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links WHERE code = $1', [code]);
     return r.rows[0] || null;
   }
-  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
+  if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
   return memory.links.find(l => l.code === code) || null;
 }
 
 async function listLinks() {
-  if (DATABASE_URL && pool) {
+  if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
     const r = await pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links ORDER BY created_at DESC');
     return r.rows;
   }
-  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
+  if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
   return memory.links.slice().sort((a,b)=> new Date(b.created_at) - new Date(a.created_at));
 }
 
 async function incrementClick(code) {
-  if (DATABASE_URL && pool) {
+  if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
     const r = await pool.query('UPDATE links SET clicks = clicks + 1, last_clicked = now() WHERE code = $1 RETURNING code, url, clicks, created_at, last_clicked', [code]);
     return r.rows[0] || null;
   }
-  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
+  if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
   const item = memory.links.find(l => l.code === code);
   if (!item) return null;
   item.clicks = (item.clicks || 0) + 1;
@@ -144,11 +148,11 @@ async function incrementClick(code) {
 }
 
 async function deleteLink(code) {
-  if (DATABASE_URL && pool) {
+  if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
     const r = await pool.query('DELETE FROM links WHERE code = $1 RETURNING code', [code]);
     return { changed: r.rowCount };
   }
-  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
+  if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
   const before = memory.links.length;
   memory.links = memory.links.filter(l => l.code !== code);
   try { await fs.writeFile(DB_FILE, JSON.stringify({ links: memory.links }, null, 2), 'utf8'); } catch (e) {}
