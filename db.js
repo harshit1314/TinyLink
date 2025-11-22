@@ -68,9 +68,16 @@ async function initPg() {
   `;
 
   try {
+    // quick ping to ensure the DB is reachable; avoid running migrations here in serverless runtime
     await withTimeout(pool.query('SELECT 1'), 4000, 'pg ping timeout');
-    await withTimeout(pool.query(create), 4000, 'pg create table timeout');
-    console.info('Postgres initialized and links table ensured');
+    // Only run create-table during explicit migration runs. This avoids long startup
+    // work on cold starts that can cause function invocation timeouts.
+    if (process.env.RUN_DB_INIT === '1') {
+      await withTimeout(pool.query(create), 4000, 'pg create table timeout');
+      console.info('Postgres initialized and links table ensured');
+    } else {
+      console.info('Postgres reachable; skipping runtime schema creation (RUN_DB_INIT not set)');
+    }
   } catch (e) {
     console.error('Postgres init failed or timed out; falling back to memory store:', e && e.message ? e.message : e);
     try { await pool.end(); } catch (_) {}
