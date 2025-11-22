@@ -1,11 +1,8 @@
-const serverless = require('serverless-http');
 const app = require('../server');
 
-// Export multiple handler forms to improve compatibility with Vercel and other hosts.
-const handler = serverless(app);
-module.exports = handler;
-module.exports.handler = handler;
-module.exports.default = handler;
-
-// Also export a plain Express-style handler (some platforms call the file directly)
+// Export the raw Express app as the function handler. This keeps the original
+// URL and path intact when invoked by Vercel and avoids path rewriting issues.
+module.exports = (req, res) => app(req, res);
+module.exports.handler = (req, res) => app(req, res);
+module.exports.default = (req, res) => app(req, res);
 module.exports.raw = (req, res) => app(req, res);

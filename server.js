@@ -118,10 +118,23 @@ app.get('/code/:code', (req, res) => {
 // Delete link
 app.delete('/api/links/:code', async (req, res) => {
   const code = req.params.code;
-  const row = await db.getLink(code);
-  if (!row) return res.status(404).json({ error: 'Not found' });
-  await db.deleteLink(code);
-  res.json({ ok: true });
+  try {
+    // Attempt to delete via DB abstraction. The abstraction will try Postgres
+    // first (if configured) and fall back to the local memory store. It
+    // returns an object with a `changed` count indicating how many rows were
+    // removed.
+    const result = await db.deleteLink(code);
+    const changed = result && (typeof result.changed === 'number' ? result.changed : (result.rowCount || 0));
+    if (changed && changed > 0) {
+      console.log(`[DEL] deleted code=${code} changed=${changed}`);
+      return res.json({ ok: true });
+    }
+    console.log(`[DEL] delete attempt for code=${code} - not found (result=${JSON.stringify(result)})`);
+    return res.status(404).json({ error: 'Not found' });
+  } catch (e) {
+    console.error('[DEL] error deleting code=', code, e && e.message ? e.message : e);
+    return res.status(500).json({ error: 'Failed to delete' });
+  }
 });
 
 // Redirect route (must be after api and static)

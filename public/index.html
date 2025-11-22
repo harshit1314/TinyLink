@@ -108,10 +108,29 @@
           tbody.appendChild(tr);
         }
         document.querySelectorAll('.delBtn').forEach(b => b.addEventListener('click', async (e) => {
-          const code = e.target.dataset.code;
+          // Use currentTarget to reliably get the button even if an inner element was clicked
+          const btn = e.currentTarget;
+          const code = btn.dataset.code;
           if (!confirm(`Delete ${code}?`)) return;
-          const r = await fetch(`/api/links/${code}`, { method: 'DELETE' });
-          if (r.ok) loadLinks();
+          try {
+            const r = await fetch(`/api/links/${code}`, { method: 'DELETE', credentials: 'same-origin' });
+            // If we get HTML (e.g., Vercel auth page) or non-JSON, show a helpful message
+            const ct = r.headers.get('content-type') || '';
+            if (!r.ok) {
+              let txt = '';
+              try {
+                if (ct.includes('application/json')) txt = JSON.stringify(await r.json());
+                else txt = await r.text();
+              } catch (e) { txt = `Status ${r.status}`; }
+              console.error('DELETE /api/links failed', r.status, txt);
+              alert(`Delete failed: ${r.status} - ${txt.slice ? txt.slice(0,200) : txt}`);
+              return;
+            }
+            loadLinks();
+          } catch (err) {
+            console.error('Failed to call DELETE /api/links', err);
+            alert('Failed to delete link: ' + (err && err.message ? err.message : err));
+          }
         }));
         document.querySelectorAll('.copyBtn').forEach(b => b.addEventListener('click', async (e) => {
           const short = e.target.dataset.short;
@@ -124,7 +143,7 @@
 
       async function loadLinks() {
         try {
-          const res = await fetch('/api/links');
+          const res = await fetch('/api/links', { credentials: 'same-origin' });
           if (!res.ok) {
             const txt = await res.text().catch(()=>null);
             console.error('API GET /api/links error', res.status, txt);
@@ -177,7 +196,7 @@
         msg.textContent = 'Creating...';
         const body = { url: urlVal };
         if (codeVal) body.code = codeVal;
-        const res = await fetch('/api/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const res = await fetch('/api/links', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin' });
         if (res.ok && res.status === 201) {
           let data = {};
           try { data = await res.json(); } catch(e) { console.error('Invalid JSON response for POST /api/links', e); }
