@@ -4,7 +4,6 @@ const path = require('path');
 const fs = require('fs').promises;
 
 const DB_FILE = process.env.JSON_DB_FILE || path.join(__dirname, 'data.json');
-
 const DATABASE_URL = process.env.DATABASE_URL;
 
 // In-memory fallback store for non-Postgres / serverless environments
@@ -22,75 +21,70 @@ async function ensureLocalFile() {
   }
 }
 
-let pool;
+let pool = null;
+let initializing = false;
 let dnsChecked = false;
+
+const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
+
 async function initPg() {
   if (!DATABASE_URL) return;
-  if (pool) return;
-  // Configure pool for serverless: small pool and short timeouts so it fails fast instead
-  // Tune for Neon: pooler hosts should be used with a small client-side pool.
+  if (pool || initializing) return;
+  initializing = true;
+
+  // Tune pool options for Neon / serverless
   const isNeon = DATABASE_URL.includes('.neon.tech') || DATABASE_URL.includes('neon.');
   const isPooler = DATABASE_URL.includes('pooler');
-
   const poolOpts = {
     connectionString: DATABASE_URL,
     max: process.env.VERCEL ? (isPooler ? 2 : 1) : (isPooler ? 6 : 10),
     connectionTimeoutMillis: 4000,
     idleTimeoutMillis: 10000,
   };
-
-  // Some hosts (Neon) require SSL; allow override via DB_SSL or PGSSLMODE
   const needSSL = !!process.env.DB_SSL || (process.env.PGSSLMODE === 'require') || isNeon || !!process.env.VERCEL;
   if (needSSL) poolOpts.ssl = { rejectUnauthorized: false };
 
-  // Before creating the pool, optionally resolve the hostname once so DNS issues are visible in logs.
+  // Quick DNS check (don't throw) — just log to help diagnostics
   if (!dnsChecked) {
     dnsChecked = true;
     try {
       const parsed = new URL(DATABASE_URL);
-      const host = parsed.hostname;
-      // quick DNS lookup to surface obvious misconfiguration (but do NOT throw; allow connection attempt)
-      await dns.lookup(host);
+      await dns.lookup(parsed.hostname);
     } catch (dnsErr) {
-      console.warn('Warning: DNS lookup for DATABASE_URL host failed or was busy. Will continue and let the driver attempt connection. Error:', dnsErr && dnsErr.message ? dnsErr.message : dnsErr);
-      // don't throw — in some serverless environments dns.lookup may be unreliable (EBUSY); allow pool to try
+      console.warn('DNS lookup for DATABASE_URL host failed (non-fatal):', dnsErr && dnsErr.message ? dnsErr.message : dnsErr);
     }
   }
 
   pool = new Pool(poolOpts);
 
-  // Create table if not exists, but guard with a short timeout to avoid function invocation timeout
   const create = `
     CREATE TABLE IF NOT EXISTS links (
       code VARCHAR(64) PRIMARY KEY,
       url TEXT NOT NULL,
       clicks INTEGER NOT NULL DEFAULT 0,
-      try {
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       last_clicked TIMESTAMPTZ
     );
   `;
 
-  // Helper to run a promise with a timeout
-        console.warn('DNS lookup for DATABASE_URL host failed (will fallback to memory if needed):', dnsErr && dnsErr.message ? dnsErr.message : dnsErr);
-        // allow init to continue; the subsequent pool creation/queries will surface errors
-
-  // Try a quick connectivity check then create table; if either fails, clean up pool and fall back
   try {
     await withTimeout(pool.query('SELECT 1'), 4000, 'pg ping timeout');
     await withTimeout(pool.query(create), 4000, 'pg create table timeout');
+    console.info('Postgres initialized and links table ensured');
   } catch (e) {
     console.error('Postgres init failed or timed out; falling back to memory store:', e && e.message ? e.message : e);
-    try { await pool.end(); } catch(_){}
+    try { await pool.end(); } catch (_) {}
     pool = null;
+  } finally {
+    initializing = false;
   }
 }
 
-// Initialize memory file for local dev
 ensureLocalFile().catch(()=>{});
 
 async function createLink({ code, url }) {
-  if (DATABASE_URL) {
-    await initPg();
+  // If pool is ready, use it. If not, attempt to start init asynchronously and fall back to memory.
+  if (DATABASE_URL && pool) {
     try {
       await pool.query('INSERT INTO links(code, url, clicks, created_at) VALUES($1,$2,0,now())', [code, url]);
       return;
@@ -100,7 +94,10 @@ async function createLink({ code, url }) {
     }
   }
 
-  // local / memory
+  // trigger async initialization if not already started
+  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
+
+  // Fallback to local memory store
   if (memory.links.find(l => l.code === code)) throw new Error('exists');
   const now = new Date().toISOString();
   memory.links.push({ code, url, clicks: 0, created_at: now, last_clicked: null });
@@ -108,29 +105,29 @@ async function createLink({ code, url }) {
 }
 
 async function getLink(code) {
-  if (DATABASE_URL) {
-    await initPg();
+  if (DATABASE_URL && pool) {
     const r = await pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links WHERE code = $1', [code]);
     return r.rows[0] || null;
   }
+  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
   return memory.links.find(l => l.code === code) || null;
 }
 
 async function listLinks() {
-  if (DATABASE_URL) {
-    await initPg();
+  if (DATABASE_URL && pool) {
     const r = await pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links ORDER BY created_at DESC');
     return r.rows;
   }
+  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
   return memory.links.slice().sort((a,b)=> new Date(b.created_at) - new Date(a.created_at));
 }
 
 async function incrementClick(code) {
-  if (DATABASE_URL) {
-    await initPg();
+  if (DATABASE_URL && pool) {
     const r = await pool.query('UPDATE links SET clicks = clicks + 1, last_clicked = now() WHERE code = $1 RETURNING code, url, clicks, created_at, last_clicked', [code]);
     return r.rows[0] || null;
   }
+  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
   const item = memory.links.find(l => l.code === code);
   if (!item) return null;
   item.clicks = (item.clicks || 0) + 1;
@@ -140,11 +137,11 @@ async function incrementClick(code) {
 }
 
 async function deleteLink(code) {
-  if (DATABASE_URL) {
-    await initPg();
+  if (DATABASE_URL && pool) {
     const r = await pool.query('DELETE FROM links WHERE code = $1 RETURNING code', [code]);
     return { changed: r.rowCount };
   }
+  if (DATABASE_URL && !pool && !initializing) initPg().catch(()=>{});
   const before = memory.links.length;
   memory.links = memory.links.filter(l => l.code !== code);
   try { await fs.writeFile(DB_FILE, JSON.stringify({ links: memory.links }, null, 2), 'utf8'); } catch (e) {}
