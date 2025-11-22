@@ -97,11 +97,17 @@ async function createLink({ code, url }) {
   // If pool is ready and DB is not in backoff, use it. If not, start init async and fall back to memory.
   if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
     try {
-      await pool.query('INSERT INTO links(code, url, clicks, created_at) VALUES($1,$2,0,now())', [code, url]);
+      await withTimeout(pool.query('INSERT INTO links(code, url, clicks, created_at) VALUES($1,$2,0,now())', [code, url]), 3000, 'pg insert timeout');
       return;
     } catch (e) {
+      console.error('DB insert failed, falling back to memory:', e && e.message ? e.message : e);
+      // close pool and backoff so we don't repeatedly hit a bad DB
+      try { await pool.end(); } catch(_){}
+      pool = null;
+      const backoff = parseInt(process.env.DB_BACKOFF_MS || '60000', 10);
+      dbUnavailableUntil = Date.now() + backoff;
       if (e && e.code === '23505') throw new Error('exists');
-      throw e;
+      // fall through to memory fallback
     }
   }
 
@@ -117,8 +123,16 @@ async function createLink({ code, url }) {
 
 async function getLink(code) {
   if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
-    const r = await pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links WHERE code = $1', [code]);
-    return r.rows[0] || null;
+    try {
+      const r = await withTimeout(pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links WHERE code = $1', [code]), 3000, 'pg get timeout');
+      return r.rows[0] || null;
+    } catch (e) {
+      console.error('DB getLink failed, falling back to memory:', e && e.message ? e.message : e);
+      try { await pool.end(); } catch(_){}
+      pool = null;
+      const backoff = parseInt(process.env.DB_BACKOFF_MS || '60000', 10);
+      dbUnavailableUntil = Date.now() + backoff;
+    }
   }
   if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
   return memory.links.find(l => l.code === code) || null;
@@ -126,8 +140,16 @@ async function getLink(code) {
 
 async function listLinks() {
   if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
-    const r = await pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links ORDER BY created_at DESC');
-    return r.rows;
+    try {
+      const r = await withTimeout(pool.query('SELECT code, url, clicks, created_at, last_clicked FROM links ORDER BY created_at DESC'), 3000, 'pg list timeout');
+      return r.rows;
+    } catch (e) {
+      console.error('DB listLinks failed, falling back to memory:', e && e.message ? e.message : e);
+      try { await pool.end(); } catch(_){}
+      pool = null;
+      const backoff = parseInt(process.env.DB_BACKOFF_MS || '60000', 10);
+      dbUnavailableUntil = Date.now() + backoff;
+    }
   }
   if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
   return memory.links.slice().sort((a,b)=> new Date(b.created_at) - new Date(a.created_at));
@@ -135,8 +157,16 @@ async function listLinks() {
 
 async function incrementClick(code) {
   if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
-    const r = await pool.query('UPDATE links SET clicks = clicks + 1, last_clicked = now() WHERE code = $1 RETURNING code, url, clicks, created_at, last_clicked', [code]);
-    return r.rows[0] || null;
+    try {
+      const r = await withTimeout(pool.query('UPDATE links SET clicks = clicks + 1, last_clicked = now() WHERE code = $1 RETURNING code, url, clicks, created_at, last_clicked', [code]), 3000, 'pg update timeout');
+      return r.rows[0] || null;
+    } catch (e) {
+      console.error('DB incrementClick failed, falling back to memory:', e && e.message ? e.message : e);
+      try { await pool.end(); } catch(_){}
+      pool = null;
+      const backoff = parseInt(process.env.DB_BACKOFF_MS || '60000', 10);
+      dbUnavailableUntil = Date.now() + backoff;
+    }
   }
   if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
   const item = memory.links.find(l => l.code === code);
@@ -149,8 +179,16 @@ async function incrementClick(code) {
 
 async function deleteLink(code) {
   if (DATABASE_URL && pool && Date.now() >= dbUnavailableUntil) {
-    const r = await pool.query('DELETE FROM links WHERE code = $1 RETURNING code', [code]);
-    return { changed: r.rowCount };
+    try {
+      const r = await withTimeout(pool.query('DELETE FROM links WHERE code = $1 RETURNING code', [code]), 3000, 'pg delete timeout');
+      return { changed: r.rowCount };
+    } catch (e) {
+      console.error('DB deleteLink failed, falling back to memory:', e && e.message ? e.message : e);
+      try { await pool.end(); } catch(_){}
+      pool = null;
+      const backoff = parseInt(process.env.DB_BACKOFF_MS || '60000', 10);
+      dbUnavailableUntil = Date.now() + backoff;
+    }
   }
   if (DATABASE_URL && !pool && !initializing && Date.now() >= dbUnavailableUntil) initPg().catch(()=>{});
   const before = memory.links.length;
