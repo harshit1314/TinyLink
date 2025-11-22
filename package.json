@@ -1,23 +1,35 @@
 {
   "name": "tinylink",
-  "version": "1.0.0",
-  "description": "TinyLink - URL shortener (Express + SQLite)",
-  "main": "server.js",
+  "version": "0.1.0",
+  "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "generate": "drizzle-kit generate:pg",
+    "migrate": "tsx src/db/migrate.ts",
+    "push": "drizzle-kit push:pg"
   },
-  "author": "",
-  "license": "MIT",
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "morgan": "^1.10.0",
-    "dotenv": "^16.0.3",
-    "pg": "^8.11.0",
-    "serverless-http": "^3.0.0"
+    "drizzle-orm": "^0.29.3",
+    "next": "14.1.0",
+    "pg": "^8.11.3",
+    "react": "^18",
+    "react-dom": "^18"
   },
   "devDependencies": {
-    "nodemon": "^2.0.22"
+    "@tailwindcss/postcss": "^4.1.17",
+    "@types/node": "^20",
+    "@types/pg": "^8.11.0",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10.4.22",
+    "dotenv": "^16.4.5",
+    "drizzle-kit": "^0.20.13",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.1",
+    "tsx": "^4.7.1",
+    "typescript": "^5"
   }
 }
