@@ -1,4 +1,5 @@
 const { Pool } = require('pg');
+const dns = require('dns').promises;
 const path = require('path');
 const fs = require('fs').promises;
 
@@ -22,20 +23,39 @@ async function ensureLocalFile() {
 }
 
 let pool;
+let dnsChecked = false;
 async function initPg() {
   if (!DATABASE_URL) return;
   if (pool) return;
   // Configure pool for serverless: small pool and short timeouts so it fails fast instead
+  // Tune for Neon: pooler hosts should be used with a small client-side pool.
+  const isNeon = DATABASE_URL.includes('.neon.tech') || DATABASE_URL.includes('neon.');
+  const isPooler = DATABASE_URL.includes('pooler');
+
   const poolOpts = {
     connectionString: DATABASE_URL,
-    max: process.env.VERCEL ? 1 : 10,
-    connectionTimeoutMillis: 5000,
+    max: process.env.VERCEL ? (isPooler ? 2 : 1) : (isPooler ? 6 : 10),
+    connectionTimeoutMillis: 4000,
     idleTimeoutMillis: 10000,
   };
 
   // Some hosts (Neon) require SSL; allow override via DB_SSL or PGSSLMODE
-  const needSSL = !!process.env.DB_SSL || (process.env.PGSSLMODE === 'require') || !!process.env.VERCEL;
+  const needSSL = !!process.env.DB_SSL || (process.env.PGSSLMODE === 'require') || isNeon || !!process.env.VERCEL;
   if (needSSL) poolOpts.ssl = { rejectUnauthorized: false };
+
+  // Before creating the pool, optionally resolve the hostname once so DNS issues are visible in logs.
+  if (!dnsChecked) {
+    dnsChecked = true;
+    try {
+      const parsed = new URL(DATABASE_URL);
+      const host = parsed.hostname;
+      // quick DNS lookup to surface obvious misconfiguration (but do NOT throw; allow connection attempt)
+      await dns.lookup(host);
+    } catch (dnsErr) {
+      console.warn('Warning: DNS lookup for DATABASE_URL host failed or was busy. Will continue and let the driver attempt connection. Error:', dnsErr && dnsErr.message ? dnsErr.message : dnsErr);
+      // don't throw — in some serverless environments dns.lookup may be unreliable (EBUSY); allow pool to try
+    }
+  }
 
   pool = new Pool(poolOpts);
 
@@ -45,13 +65,14 @@ async function initPg() {
       code VARCHAR(64) PRIMARY KEY,
       url TEXT NOT NULL,
       clicks INTEGER NOT NULL DEFAULT 0,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      try {
       last_clicked TIMESTAMPTZ
     );
   `;
 
   // Helper to run a promise with a timeout
-  const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
+        console.warn('DNS lookup for DATABASE_URL host failed (will fallback to memory if needed):', dnsErr && dnsErr.message ? dnsErr.message : dnsErr);
+        // allow init to continue; the subsequent pool creation/queries will surface errors
 
   // Try a quick connectivity check then create table; if either fails, clean up pool and fall back
   try {
